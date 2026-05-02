@@ -1,0 +1,43 @@
+# Account configuration template.
+#
+# 1. Copy this file to `accounts.yaml`
+# 2. Add an entry per account you want to monitor
+# 3. Personal account aliases generally aren't sensitive but you may
+#    prefer to keep `accounts.yaml` gitignored too — your choice.
+#
+# Hot-reload: the service watches this file and picks up changes
+# automatically — no restart needed when you add or rename an account.
+#
+# Recognized types: live, sim, funded, challenge, eval, demo
+# (anything else is shown as-is).
+
+defaults:
+  # Used for any NT8 account not listed below. Set to true to show
+  # unlisted accounts with their raw NT8 IDs; false hides them.
+  # Recommended: false once you've aliased everything you care about,
+  # since NT8 reports dozens of dormant accounts.
+  show_unlisted: false
+
+accounts:
+
+  # --- Examples — replace with your own ---
+
+  - id: Sim101
+    alias: Simulator
+    type: sim
+
+  # - id: TDFYSL50351370795
+  #   alias: Tradify 50K #1
+  #   type: funded
+  #   notes: ""
+
+  # - id: APEX3386640000002
+  #   alias: Apex 50K
+  #   type: challenge
+
+  # --- Hide internal NT accounts you'll never want to see ---
+  - id: Backtest
+    hide: true
+
+  - id: Playback101
+    hide: true

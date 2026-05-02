@@ -1,11 +1,40 @@
+# Discord configuration template.
+#
+# 1. Copy this file to `discord_config.yaml` (which is gitignored)
+# 2. Fill in the placeholder values with your real tokens / IDs / URLs
+# 3. Never commit the real `discord_config.yaml` to git
+#
+# See README.md "Part 3 — Discord side" for how to obtain each value.
+
 bot:
+  # Bot token from https://discord.com/developers/applications -> Bot tab.
+  # Treat like a password — anyone with this token can act as the bot.
   token: "PASTE_YOUR_BOT_TOKEN_HERE"
+
+  # Channel ID where the pinned status message lives. Right-click the
+  # channel in Discord (with Developer Mode enabled in Settings -> Advanced)
+  # and choose "Copy Channel ID". Must be a number, not a string.
   status_channel_id: 0000000000000000000
+
+  # Optional: Discord user ID to @mention when an alert fires.
+  # Right-click your username -> "Copy User ID". Set to null to disable mentions.
   alert_mention_user_id: null
+
 webhooks:
+  # Channel webhook URLs. Right-click channel -> Edit Channel -> Integrations
+  # -> Webhooks -> New Webhook -> Copy URL. Treat like passwords.
   fills:  "https://discord.com/api/webhooks/PASTE_FILLS_WEBHOOK_URL"
   alerts: "https://discord.com/api/webhooks/PASTE_ALERTS_WEBHOOK_URL"
+
 behavior:
+  # How often the status message gets edited. Match or exceed NT's poll
+  # interval (30s by default). Discord allows ~5 edits per 5 sec per
+  # channel, so 30s is comfortably under the limit.
   status_edit_interval_sec: 30
+
+  # Suppress duplicate alerts. If the same alert fires repeatedly (e.g.
+  # NT keeps disconnecting), only post it once per this many seconds.
   alert_dedupe_window_sec: 300
+
+  # Whether to post a "recovered" message when an alert condition clears.
   post_recovery: true
