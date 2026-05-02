@@ -1,0 +1,23 @@
+# Secrets — never commit
+discord_config.yaml
+
+# Runtime state — changes every poll, not source code
+state.json
+
+# Logs
+*.log
+nt_monitor.log
+
+# Python cruft
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Editor cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

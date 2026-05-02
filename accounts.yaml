@@ -1,0 +1,62 @@
+# Account configuration
+# ----------------------
+# Maps NT8 account IDs to friendly names, types, and display options.
+#
+# Reload behaviour: the Python service watches this file for changes
+# and reloads it automatically — no restart needed when you add or
+# rename an account.
+#
+# Account types affect display badges in Discord and the dashboard.
+# Recognized types: live, sim, funded, challenge, eval, demo
+# (anything else is shown as-is)
+
+defaults:
+  # Used for any NT8 account not listed below. Set to null to hide
+  # unlisted accounts entirely (recommended once you've aliased everything
+  # you care about, since NT8 reports dozens of dormant accounts).
+  show_unlisted: false
+
+accounts:
+
+  # --- Live / Sim ---
+  - id: Sim101
+    alias: Sim
+    type: sim
+    notes: Default NT simulator account
+
+  # --- Tradify (active) ---
+  - id: TDFYSL50351370795
+    alias: Tradify 50K #1
+    type: funded
+    notes: ""
+
+  - id: TDFYSL25742418818
+    alias: Tradify 25K
+    type: funded
+    notes: ""
+
+  # --- Tradify (inactive — uncomment + fill in as they become active) ---
+  # - id: TDFYSL50644776735
+  #   alias: Tradify 50K #2
+  #   type: challenge
+
+  # - id: TDFYSL50590618654
+  #   alias: Tradify 50K #3
+  #   type: challenge
+
+  # --- Apex (uncomment + fill in as you activate them) ---
+  # - id: APEX3386640000002
+  #   alias: Apex 50K #1
+  #   type: funded
+
+  # - id: APEX3386640000003
+  #   alias: Apex 100K
+  #   type: challenge
+
+  # --- Excluded from monitoring entirely ---
+  # Backtest and Playback are NT internal accounts; nothing useful to monitor.
+  - id: Backtest
+    hide: true
+
+  - id: Playback101
+    hide: true

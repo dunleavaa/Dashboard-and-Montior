@@ -1,0 +1,11 @@
+bot:
+  token: "PASTE_YOUR_BOT_TOKEN_HERE"
+  status_channel_id: 0000000000000000000
+  alert_mention_user_id: null
+webhooks:
+  fills:  "https://discord.com/api/webhooks/PASTE_FILLS_WEBHOOK_URL"
+  alerts: "https://discord.com/api/webhooks/PASTE_ALERTS_WEBHOOK_URL"
+behavior:
+  status_edit_interval_sec: 30
+  alert_dedupe_window_sec: 300
+  post_recovery: true
