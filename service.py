@@ -23,7 +23,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import signal
 import sys
 import time
@@ -39,6 +41,12 @@ from nt_reader import (
     NTReader,
     StrategiesSnapshot,
 )
+from grid_builder import build_grid
+from grid_discord_poster import post_grid
+from grid_scheduler import events_to_fire
+from grid_settings import GridSettings
+from grid_state import GridState
+from trades_discord_poster import post_trade_close
 from pnl_tracker import PnLTracker
 from web_server import SnapshotStore, WebServer
 
@@ -109,6 +117,33 @@ class NTMonitorService:
         self.web_server: Optional[WebServer] = None
         if web_enabled:
             self.web_server = WebServer(self.snapshot_store, web_host, web_port)
+
+        # Grid feature — optional. If grid_settings.yaml is absent the
+        # feature stays dormant; everything else runs unchanged.
+        grid_settings_path = os.path.join(share_path, "grid_settings.yaml")
+        grid_state_path    = os.path.join(share_path, "grid_state.json")
+        self.grid_settings: Optional[GridSettings] = None
+        try:
+            self.grid_settings = GridSettings.load(grid_settings_path)
+            log.info("Loaded grid_settings.yaml from %s", grid_settings_path)
+        except FileNotFoundError:
+            log.info(
+                "No grid_settings.yaml at %s — grid feature disabled. "
+                "Copy grid_settings.example.yaml and edit to enable.",
+                grid_settings_path,
+            )
+        except Exception:
+            log.exception(
+                "grid_settings.yaml failed to load — grid feature disabled"
+            )
+        self.grid_state = GridState.load(grid_state_path)
+
+        # Trade tracking: posted-trade IDs persist between service restarts
+        # so trade-close announcements don't double-post after a restart.
+        self.trades_posted_path = os.path.join(
+            share_path, "trades_posted.json"
+        )
+        self.trades_posted: set[str] = self._load_trades_posted()
 
         self.alert_state = AlertState()
         self._stop = False
@@ -204,6 +239,10 @@ class NTMonitorService:
         # Evaluate alerts
         self._check_alerts(hb, st)
 
+        # Post the grid embed if a scheduled event has rolled over
+        self._maybe_post_grid()
+        self._maybe_post_trades()
+
         # First successful poll completed
         self.alert_state.initialized = True
 
@@ -296,6 +335,14 @@ class NTMonitorService:
                     "avg_price": p.avg_price,
                 })
 
+        # Grid feature: rebuild a fresh snapshot every tick from the latest
+        # ATR file and current settings, then attach it to the dashboard
+        # snapshot. This is independent of the scheduled Discord posts —
+        # the web view always shows "what would the grid look like right
+        # now", while Discord only fires at session boundaries.
+        grid_dict = self._build_current_grid_for_web()
+        trades_today = self._load_trades_today()
+
         snapshot = {
             "snapshot_at": datetime.now(timezone.utc).isoformat(),
             "status_color": color,
@@ -307,8 +354,170 @@ class NTMonitorService:
             "pnl_rows": pnl_rows,
             "strategies": strategy_cards,
             "open_positions": open_positions,
+            "grid": grid_dict,                 # None if feature not configured
+            "trades": trades_today,            # list of today's closed trades (6pm->4pm window)
+            "session_start_local": self._session_start_local().isoformat(),
         }
         self.snapshot_store.update(snapshot)
+
+    # -----------------------------------------------------------------------
+    # Trade tracking — reads trades.json from the share, posts new closures
+    # to the configured Discord webhook, and exposes today's trades on the
+    # dashboard snapshot. "Today" = the most recent 6pm-to-4pm ET window.
+    # -----------------------------------------------------------------------
+
+    def _session_start_local(self):
+        """Most recent 6pm local-time boundary. If now >= 18:00, start =
+        today 18:00; else start = yesterday 18:00. The session runs through
+        next-day 16:00, matching the user's chosen trading-day window."""
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+        now_local = datetime.now(tz=tz)
+        boundary = now_local.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now_local < boundary:
+            boundary -= timedelta(days=1)
+        return boundary
+
+    def _read_trades_file(self) -> list[dict]:
+        """Read trades.json from the share. Returns [] if missing or invalid."""
+        path = os.path.join(self.share_path, "trades.json")
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return list(data.get("trades", []))
+        except Exception:
+            log.exception("Failed to read trades.json")
+            return []
+
+    def _load_trades_today(self) -> list[dict]:
+        """Subset of trades.json filtered to the current session window.
+        Sorted newest-first."""
+        from datetime import timezone as _tz
+        from zoneinfo import ZoneInfo
+        trades = self._read_trades_file()
+        if not trades:
+            return []
+        local_tz = ZoneInfo("America/New_York")
+        session_start_utc = self._session_start_local().astimezone(_tz.utc)
+        out = []
+        for t in trades:
+            exit_iso = t.get("exit_time")
+            if not exit_iso:
+                continue
+            try:
+                # Handle both "2026-05-15T12:34:56+00:00" and "...Z"
+                s = exit_iso[:-1] + "+00:00" if exit_iso.endswith("Z") else exit_iso
+                exit_dt = datetime.fromisoformat(s)
+            except Exception:
+                continue
+            # NT8's DateTime.ToString("o") on Unspecified-kind values emits
+            # no offset; Python parses those as naive. Treat naive timestamps
+            # as the NT machine's local time (America/New_York for this user).
+            if exit_dt.tzinfo is None:
+                exit_dt = exit_dt.replace(tzinfo=local_tz)
+            if exit_dt >= session_start_utc:
+                out.append(t)
+        out.sort(key=lambda x: x.get("exit_time", ""), reverse=True)
+        return out
+
+    def _load_trades_posted(self) -> set:
+        """Load the persistent set of trade IDs already posted to Discord."""
+        if not os.path.exists(self.trades_posted_path):
+            return set()
+        try:
+            with open(self.trades_posted_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data.get("posted_ids", []))
+        except Exception:
+            log.exception(
+                "Failed to read trades_posted.json — starting with empty set"
+            )
+            return set()
+
+    def _save_trades_posted(self) -> None:
+        try:
+            tmp = self.trades_posted_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"posted_ids": sorted(self.trades_posted)}, f)
+            os.replace(tmp, self.trades_posted_path)
+        except Exception:
+            log.exception("Failed to save trades_posted.json")
+
+    def _maybe_post_trades(self) -> None:
+        """Read trades.json, post newly-completed trades to Discord, and
+        cap the in-memory set so it doesn't grow without bound."""
+        if self.grid_settings is None:
+            return
+        url = (self.grid_settings.trades_webhook_url or "").strip()
+        if not url:
+            return  # Discord trade posting disabled
+
+        trades = self._read_trades_file()
+        if not trades:
+            return
+
+        new_any = False
+        for t in trades:
+            tid = t.get("id")
+            if not tid or tid in self.trades_posted:
+                continue
+
+            # Backfilled trades come from the strategy's startup history replay
+            # — they're real, but historical. The user wants them on the
+            # dashboard, not in the Discord fills channel. Mark them as posted
+            # so we never accidentally announce them later if the flag ever
+            # gets dropped from the JSON, then move on.
+            if t.get("backfilled"):
+                self.trades_posted.add(tid)
+                new_any = True
+                continue
+
+            ok = post_trade_close(url, t, timezone="America/New_York")
+            if ok:
+                self.trades_posted.add(tid)
+                new_any = True
+                log.info(
+                    "Posted trade close: %s %s %s ct  P&L %s",
+                    t.get("instrument"), t.get("side"), t.get("qty"),
+                    t.get("pnl_dollars"),
+                )
+
+        if new_any:
+            # Cap the posted set at 1000 entries to bound the state file size
+            if len(self.trades_posted) > 1000:
+                self.trades_posted = set(sorted(self.trades_posted)[-1000:])
+            self._save_trades_posted()
+
+    def _build_current_grid_for_web(self) -> Optional[dict]:
+        """Build a current grid snapshot for the web dashboard.
+
+        Returns None (rendered as 'no grid yet') if:
+          - the grid feature isn't configured (no grid_settings.yaml), or
+          - atr_ranges.json doesn't exist or won't parse.
+
+        Never raises — failures log and degrade gracefully so a broken
+        ATR file can't take down the dashboard update path.
+        """
+        if self.grid_settings is None:
+            return None
+        try:
+            atr_path = os.path.join(self.share_path, "atr_ranges.json")
+            with open(atr_path, "r", encoding="utf-8") as f:
+                atr_data = json.load(f)
+            # Use a neutral event name for the web view since it's not
+            # tied to a particular session boundary.
+            snap = build_grid(
+                atr_data=atr_data,
+                settings=self.grid_settings,
+                event_name="Live",
+            )
+            return snap.to_dict()
+        except Exception:
+            log.exception("Failed to build grid for web dashboard")
+            return None
 
     # -----------------------------------------------------------------------
     # Alert evaluation
@@ -455,6 +664,62 @@ class NTMonitorService:
                     description=f"**{cfg.display_name}** is connected again.",
                 )
             self.alert_state.account_connected[key] = acct.connected
+
+    # -----------------------------------------------------------------------
+    # Grid feature — scheduled embed posts to #trade-grid
+    # -----------------------------------------------------------------------
+
+    def _maybe_post_grid(self) -> None:
+        """Fire any due grid events. No-op when the feature isn't configured."""
+        if self.grid_settings is None:
+            return
+
+        # Hot-reload settings if the user edited the YAML
+        try:
+            self.grid_settings.reload_if_changed()
+        except Exception:
+            log.exception("grid_settings.reload_if_changed() failed; continuing")
+
+        pending = events_to_fire(
+            self.grid_settings.schedule, self.grid_state
+        )
+        if not pending:
+            return
+
+        # Read fresh ATR data for this batch (cheap — local file)
+        atr_path = os.path.join(self.share_path, "atr_ranges.json")
+        try:
+            with open(atr_path, "r", encoding="utf-8") as f:
+                atr_data = json.load(f)
+        except Exception:
+            log.exception(
+                "Failed to read atr_ranges.json from %s; skipping grid post",
+                atr_path,
+            )
+            return
+
+        for pe in pending:
+            try:
+                snap = build_grid(
+                    atr_data=atr_data,
+                    settings=self.grid_settings,
+                    event_name=pe.event.name,
+                )
+                post_grid(
+                    webhook_url=self.grid_settings.webhook_url,
+                    snapshot=snap,
+                    state=self.grid_state,
+                )
+                self.grid_state.mark_fired(pe.event.name, pe.local_date_iso)
+                log.info(
+                    "Grid posted for event=%s date=%s",
+                    pe.event.name, pe.local_date_iso,
+                )
+            except Exception:
+                log.exception(
+                    "Grid post failed for event=%s — will retry next tick",
+                    pe.event.name,
+                )
 
 
 # ---------------------------------------------------------------------------
